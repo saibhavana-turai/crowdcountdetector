@@ -1,0 +1,20 @@
+# filename: .gitignore
+
+# Python
+env/
+venv/
+__pycache__/
+*.pyc
+
+# Database and Temp Files
+instance/
+temp_video.mp4
+
+# Model files - DO NOT PUSH TO GITHUB
+models/
+*.pth
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
