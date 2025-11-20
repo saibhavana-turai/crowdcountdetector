@@ -150,10 +150,12 @@ def authentication_page():
 
 def main_dashboard():
     st.set_page_config(layout="wide", initial_sidebar_state="expanded", page_icon="👥", page_title="Dashboard")
+    # ... (session state initialization is unchanged) ...
     if 'chart_data' not in st.session_state: st.session_state.chart_data = pd.DataFrame(columns=['Time', 'Count'])
     if 'alert_history' not in st.session_state: st.session_state.alert_history = []
     if 'last_alert_time' not in st.session_state: st.session_state.last_alert_time = 0
     
+    # ... (model downloading and loading is unchanged) ...
     MODELS_DIR = "models"; os.makedirs(MODELS_DIR, exist_ok=True)
     MODEL_URL_A = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_a.pth"
     MODEL_URL_B = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_b.pth"
@@ -161,11 +163,11 @@ def main_dashboard():
     MODEL_PATH_B = os.path.join(MODELS_DIR, "csrnet_best_part_b.pth")
     if not (download_file(MODEL_URL_A, MODEL_PATH_A) and download_file(MODEL_URL_B, MODEL_PATH_B)):
         st.error("Model download failed. App cannot continue."); return
-
     model_dense = load_improved_csrnet_model(MODEL_PATH_A)
     model_sparse = load_improved_csrnet_model(MODEL_PATH_B)
     yolo_model = load_yolo_model()
     
+    # ... (sidebar UI is unchanged) ...
     with st.sidebar:
         st.title("CrowdSense"); st.markdown("---")
         user_info = st.session_state.get('user', {}); st.write(f"Logged in as: **{user_info.get('email', 'N/A')}**")
@@ -181,6 +183,7 @@ def main_dashboard():
         video_file = st.file_uploader("Upload Video", type=['mp4', 'mov', 'avi'])
         image_file = st.file_uploader("Upload Image", type=['png', 'jpg', 'jpeg'])
     
+    # ... (main content UI is unchanged) ...
     st.title("Live Analysis Dashboard"); status_placeholder = st.empty()
     col1, col2 = st.columns(2);
     with col1: st.header("Processed Feed / Heatmap"); processed_feed = st.empty()
@@ -190,18 +193,33 @@ def main_dashboard():
     with col4: st.header("Alert History"); alert_placeholder = st.expander("Show/Hide Alerts", expanded=True)
     
     cap = None;
+    # --- THIS IS THE FINAL, MOST ROBUST WEBCAM FIX ---
     if use_webcam:
-        status_placeholder.info("Initializing webcam, please wait...")
-        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        status_placeholder.info("⏳ Initializing webcam, please wait...")
         
-        # --- THIS IS THE KEY CHANGE ---
-        if not cap.isOpened():
-            status_placeholder.error("Error: Could not open webcam. Is it being used by another application or are drivers missing?")
-            cap = None # Prevent the processing loop from running
-        else:
-            status_placeholder.info("Processing webcam feed...")
-        # --------------------------------
+        # We will try to open the camera a few times before giving up.
+        cap = None
+        attempts = 0
+        while attempts < 3:
+            # Try with DSHOW first, as it's often faster on Windows
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                break
+            # If DSHOW fails, try the default backend
+            cap = cv2.VideoCapture(0)
+            if cap.isOpened():
+                break
+            attempts += 1
+            time.sleep(0.5) # Wait half a second between attempts
 
+        if not cap or not cap.isOpened():
+            status_placeholder.error("❌ Error: Could not open webcam after multiple attempts. Please check system permissions and ensure no other app is using the camera.")
+            cap = None
+        else:
+            status_placeholder.info("✅ Webcam active. Processing feed...")
+    # --------------------------------------------------
+
+    # ... (rest of the file is unchanged) ...
     elif video_file:
         with open("temp_video.mp4", "wb") as f: f.write(video_file.getbuffer())
         cap = cv2.VideoCapture("temp_video.mp4"); status_placeholder.info(f"Processing uploaded video: {video_file.name}")
