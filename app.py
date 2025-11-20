@@ -30,7 +30,7 @@ Base.metadata.create_all(bind=engine)
 # --- Project Imports ---
 from alert_system import send_alert
 
-# --- Helper function to download files ---
+# --- Helper function to download files (with UX improvement) ---
 def download_file(url, destination):
     if not os.path.exists(destination) or os.path.getsize(destination) < 1_000_000:
         st.info(f"Downloading model: {os.path.basename(destination)}...")
@@ -50,48 +50,36 @@ def download_file(url, destination):
     if os.path.getsize(destination) < 1_000_000:
         st.error(f"Downloaded model is too small. Please verify the download link on Hugging Face.")
         return False
+    st.success(f"Model '{os.path.basename(destination)}' is ready.")
+    time.sleep(1)
     return True
 
-# --- Model Loading (with Caching) - DEFINITIVE FIX ---
+# --- Model Loading (with Caching) ---
 @st.cache_resource
 def load_improved_csrnet_model(path):
-    # --- FIX: Import dependencies and define class LOCALLY ---
-    import torch
-    from torchvision import models
-
+    import torch; from torchvision import models
     class ImprovedCSRNet(torch.nn.Module):
         def __init__(self):
-            super().__init__()
-            vgg16 = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+            super().__init__(); vgg16 = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
             self.frontend = torch.nn.Sequential(*list(vgg16.features.children())[:23])
             self.backend = torch.nn.Sequential(
-                torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
-                torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
-                torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
-                torch.nn.Conv2d(512, 256, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
-                torch.nn.Conv2d(256, 128, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
-                torch.nn.Conv2d(128, 64, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
+                torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True), torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
+                torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True), torch.nn.Conv2d(512, 256, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
+                torch.nn.Conv2d(256, 128, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True), torch.nn.Conv2d(128, 64, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
             )
             self.output_layer = torch.nn.Conv2d(64, 1, 1)
         def forward(self, x):
             x = self.frontend(x); x = self.backend(x); x = self.output_layer(x)
             return torch.nn.functional.interpolate(x, size=(512, 512), mode='bilinear', align_corners=False)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = ImprovedCSRNet().to(device)
-    import torch.serialization
-    torch.serialization.add_safe_globals([np.core.multiarray.scalar])
-    
-    # --- FIX: weights_only must be False for your model file ---
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'); model = ImprovedCSRNet().to(device)
+    import torch.serialization; torch.serialization.add_safe_globals([np.core.multiarray.scalar])
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-    
     state_dict = checkpoint.get('model_state_dict', checkpoint)
     model.load_state_dict(state_dict); model.eval()
     return model
 
 @st.cache_resource
 def load_yolo_model():
-    # --- FIX: Import torch LOCALLY ---
     import torch
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True, force_reload=False).to(device)
@@ -100,8 +88,7 @@ def load_yolo_model():
 
 # --- Core Processing Logic ---
 def preprocess_frame(frame):
-    import torch
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    import torch; device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     IMG_SIZE=(512, 512); IMAGENET_MEAN=np.array([0.485, 0.456, 0.406]); IMAGENET_STD=np.array([0.229, 0.224, 0.225])
     frame_resized = cv2.resize(frame, (IMG_SIZE[1], IMG_SIZE[0])); img_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
     img = (img_rgb.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
@@ -130,12 +117,12 @@ def get_count_and_overlay(frame, model, yolo_model, user, threshold):
 
 # --- Authentication and Main Dashboard UI ---
 def authentication_page():
+    # ... (This function is correct and unchanged) ...
     st.set_page_config(layout="centered", page_icon="👥", page_title="Welcome")
     if 'auth_view' not in st.session_state: st.session_state.auth_view = "Login"
     _, col2, _ = st.columns([1, 2, 1])
     with col2:
-        st.title("Welcome to CrowdSense")
-        choice = st.radio("Action", ["Login", "Register"], horizontal=True, label_visibility="collapsed")
+        st.title("Welcome to CrowdSense"); choice = st.radio("Action", ["Login", "Register"], horizontal=True, label_visibility="collapsed")
         st.session_state.auth_view = choice; db_session = SessionLocal()
         if st.session_state.auth_view == "Login":
             st.subheader("Login to your account")
@@ -200,7 +187,14 @@ def main_dashboard():
     with col4: st.header("Alert History"); alert_placeholder = st.expander("Show/Hide Alerts", expanded=True)
     
     cap = None;
-    if use_webcam: cap = cv2.VideoCapture(0); status_placeholder.info("Processing webcam feed...")
+    # --- THIS IS THE KEY CHANGE for WEBCAM ---
+    if use_webcam:
+        # UX Improvement: Show an immediate message
+        status_placeholder.info("Initializing webcam, please wait...")
+        # Technical Fix: Use the faster DSHOW backend on Windows
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        status_placeholder.info("Processing webcam feed...")
+    # ----------------------------------------
     elif video_file:
         with open("temp_video.mp4", "wb") as f: f.write(video_file.getbuffer())
         cap = cv2.VideoCapture("temp_video.mp4"); status_placeholder.info(f"Processing uploaded video: {video_file.name}")
@@ -209,20 +203,33 @@ def main_dashboard():
         raw_feed.image(cv2_img, channels="BGR")
         overlay, count = get_count_and_overlay(cv2_img, current_model, yolo_model, user_info, threshold)
         processed_feed.image(overlay, channels="BGR"); status_placeholder.success(f"Image processed. Predicted Count: {count}")
+        new_data = pd.DataFrame({'Time': [time.strftime('%H:%M:%S')], 'Count': [count]})
+        st.session_state.chart_data = pd.concat([st.session_state.chart_data, new_data]).tail(30)
     else: status_placeholder.info("Select an input source from the sidebar to begin.")
     
+    with chart_placeholder: st.line_chart(st.session_state.chart_data.set_index('Time'))
+    with alert_placeholder:
+        for alert in st.session_state.alert_history: st.warning(alert)
+
     if cap:
+        FRAME_SKIP = 4; frame_count = 0
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret: status_placeholder.warning("Video ended or failed to read frame."); break
             raw_feed.image(frame, channels="BGR")
-            overlay, count = get_count_and_overlay(frame, current_model, yolo_model, user_info, threshold)
-            processed_feed.image(overlay, channels="BGR")
-            new_data = pd.DataFrame({'Time': [time.strftime('%H:%M:%S')], 'Count': [count]})
-            st.session_state.chart_data = pd.concat([st.session_state.chart_data, new_data]).tail(30)
-            with chart_placeholder: st.line_chart(st.session_state.chart_data.set_index('Time'))
-            with alert_placeholder:
-                for alert in st.session_state.alert_history: st.warning(alert)
+            if frame_count % (FRAME_SKIP + 1) == 0:
+                overlay, count = get_count_and_overlay(frame, current_model, yolo_model, user_info, threshold)
+                processed_feed.image(overlay, channels="BGR")
+                new_data = pd.DataFrame({'Time': [time.strftime('%H:%M:%S')], 'Count': [count]})
+                st.session_state.chart_data = pd.concat([st.session_state.chart_data, new_data]).tail(30)
+                with chart_placeholder: st.line_chart(st.session_state.chart_data.set_index('Time'))
+                with alert_placeholder:
+                    for alert in st.session_state.alert_history: st.warning(alert)
+                st.session_state.last_overlay = overlay
+            else:
+                if 'last_overlay' in st.session_state:
+                    processed_feed.image(st.session_state.last_overlay, channels="BGR")
+            frame_count += 1
             time.sleep(0.01)
         cap.release()
 
