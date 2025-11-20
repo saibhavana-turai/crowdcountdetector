@@ -30,10 +30,12 @@ Base.metadata.create_all(bind=engine)
 # --- Project Imports ---
 from alert_system import send_alert
 
-# --- Helper function to download files (with UX improvement) ---
+# --- Helper function to download files (with one-time message) ---
 def download_file(url, destination):
+    model_name = os.path.basename(destination)
+    message_key = f"download_success_{model_name}"
     if not os.path.exists(destination) or os.path.getsize(destination) < 1_000_000:
-        st.info(f"Downloading model: {os.path.basename(destination)}...")
+        st.info(f"Downloading model: {model_name}...")
         try:
             with requests.get(url, stream=True) as r:
                 r.raise_for_status()
@@ -45,13 +47,15 @@ def download_file(url, destination):
                         f.write(chunk); bytes_downloaded += len(chunk)
                         if total_size > 0: progress_bar.progress(min(1.0, bytes_downloaded / total_size))
             progress_bar.empty()
+            st.session_state[message_key] = True
         except requests.exceptions.RequestException as e:
             st.error(f"Error downloading model: {e}"); return False
     if os.path.getsize(destination) < 1_000_000:
-        st.error(f"Downloaded model is too small. Please verify the download link on Hugging Face.")
+        st.error(f"Downloaded model is too small. Please verify the download link.")
         return False
-    st.success(f"Model '{os.path.basename(destination)}' is ready.")
-    time.sleep(1)
+    if not st.session_state.get(message_key, False):
+        st.success(f"Model '{model_name}' is ready.")
+        st.session_state[message_key] = True
     return True
 
 # --- Model Loading (with Caching) ---
@@ -117,7 +121,6 @@ def get_count_and_overlay(frame, model, yolo_model, user, threshold):
 
 # --- Authentication and Main Dashboard UI ---
 def authentication_page():
-    # ... (This function is correct and unchanged) ...
     st.set_page_config(layout="centered", page_icon="👥", page_title="Welcome")
     if 'auth_view' not in st.session_state: st.session_state.auth_view = "Login"
     _, col2, _ = st.columns([1, 2, 1])
@@ -187,14 +190,18 @@ def main_dashboard():
     with col4: st.header("Alert History"); alert_placeholder = st.expander("Show/Hide Alerts", expanded=True)
     
     cap = None;
-    # --- THIS IS THE KEY CHANGE for WEBCAM ---
     if use_webcam:
-        # UX Improvement: Show an immediate message
         status_placeholder.info("Initializing webcam, please wait...")
-        # Technical Fix: Use the faster DSHOW backend on Windows
         cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        status_placeholder.info("Processing webcam feed...")
-    # ----------------------------------------
+        
+        # --- THIS IS THE KEY CHANGE ---
+        if not cap.isOpened():
+            status_placeholder.error("Error: Could not open webcam. Is it being used by another application or are drivers missing?")
+            cap = None # Prevent the processing loop from running
+        else:
+            status_placeholder.info("Processing webcam feed...")
+        # --------------------------------
+
     elif video_file:
         with open("temp_video.mp4", "wb") as f: f.write(video_file.getbuffer())
         cap = cv2.VideoCapture("temp_video.mp4"); status_placeholder.info(f"Processing uploaded video: {video_file.name}")
@@ -215,7 +222,7 @@ def main_dashboard():
         FRAME_SKIP = 4; frame_count = 0
         while cap.isOpened():
             ret, frame = cap.read()
-            if not ret: status_placeholder.warning("Video ended or failed to read frame."); break
+            if not ret: status_placeholder.warning("Video ended or webcam disconnected."); break
             raw_feed.image(frame, channels="BGR")
             if frame_count % (FRAME_SKIP + 1) == 0:
                 overlay, count = get_count_and_overlay(frame, current_model, yolo_model, user_info, threshold)
