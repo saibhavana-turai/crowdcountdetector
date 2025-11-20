@@ -81,7 +81,7 @@ def load_improved_csrnet_model(path):
     model = ImprovedCSRNet().to(device)
     import torch.serialization
     torch.serialization.add_safe_globals([np.core.multiarray.scalar])
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
     state_dict = checkpoint.get('model_state_dict', checkpoint)
     model.load_state_dict(state_dict); model.eval()
     return model
@@ -164,8 +164,8 @@ def main_dashboard():
     
     MODELS_DIR = "models"
     os.makedirs(MODELS_DIR, exist_ok=True)
-    MODEL_URL_A = "https://drive.google.com/uc?export=download&id=1JIwn7tWrtDF7WfEpVR6XOBhINQpQBlA3"
-    MODEL_URL_B = "https://drive.google.com/uc?export=download&id=1ivhWD8LYVOEVkZMBqi-p6Rcj2Bjn3ifm"
+    MODEL_URL_A = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_a.pth"
+    MODEL_URL_B = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_b.pth"
     MODEL_PATH_A = os.path.join(MODELS_DIR, "csrnet_best_part_a.pth")
     MODEL_PATH_B = os.path.join(MODELS_DIR, "csrnet_best_part_b.pth")
     if not (download_file(MODEL_URL_A, MODEL_PATH_A) and download_file(MODEL_URL_B, MODEL_PATH_B)):
