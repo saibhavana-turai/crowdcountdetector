@@ -12,3 +12,4 @@ seaborn
 Flask-SQLAlchemy 
 requests
 pandas
+streamlit-webrtc
