@@ -32,7 +32,7 @@ from alert_system import send_alert
 
 # --- Helper function to download files ---
 def download_file(url, destination):
-    if not os.path.exists(destination):
+    if not os.path.exists(destination) or os.path.getsize(destination) < 1_000_000:
         st.info(f"Downloading model: {os.path.basename(destination)}...")
         try:
             with requests.get(url, stream=True) as r:
@@ -42,23 +42,23 @@ def download_file(url, destination):
                 bytes_downloaded = 0
                 with open(destination, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                        bytes_downloaded += len(chunk)
-                        if total_size > 0:
-                            progress_bar.progress(min(1.0, bytes_downloaded / total_size))
+                        f.write(chunk); bytes_downloaded += len(chunk)
+                        if total_size > 0: progress_bar.progress(min(1.0, bytes_downloaded / total_size))
             progress_bar.empty()
         except requests.exceptions.RequestException as e:
             st.error(f"Error downloading model: {e}"); return False
+    if os.path.getsize(destination) < 1_000_000:
+        st.error(f"Downloaded model is too small. Please verify the download link on Hugging Face.")
+        return False
     return True
 
 # --- Model Loading (with Caching) - DEFINITIVE FIX ---
 @st.cache_resource
 def load_improved_csrnet_model(path):
-    # --- FIX: Import dependencies LOCALLY inside the function ---
+    # --- FIX: Import dependencies and define class LOCALLY ---
     import torch
     from torchvision import models
 
-    # --- FIX: Define the class LOCALLY inside the function ---
     class ImprovedCSRNet(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -81,14 +81,17 @@ def load_improved_csrnet_model(path):
     model = ImprovedCSRNet().to(device)
     import torch.serialization
     torch.serialization.add_safe_globals([np.core.multiarray.scalar])
+    
+    # --- FIX: weights_only must be False for your model file ---
     checkpoint = torch.load(path, map_location=device, weights_only=False)
+    
     state_dict = checkpoint.get('model_state_dict', checkpoint)
     model.load_state_dict(state_dict); model.eval()
     return model
 
 @st.cache_resource
 def load_yolo_model():
-    # --- FIX: Import torch LOCALLY inside the function ---
+    # --- FIX: Import torch LOCALLY ---
     import torch
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True, force_reload=False).to(device)
@@ -125,7 +128,7 @@ def get_count_and_overlay(frame, model, yolo_model, user, threshold):
     cv2.putText(overlay, f'Predicted Count: {final_count}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
     return overlay, final_count
 
-# --- Authentication UI ---
+# --- Authentication and Main Dashboard UI ---
 def authentication_page():
     st.set_page_config(layout="centered", page_icon="👥", page_title="Welcome")
     if 'auth_view' not in st.session_state: st.session_state.auth_view = "Login"
@@ -155,15 +158,13 @@ def authentication_page():
                         st.session_state.auth_view = "Login"; time.sleep(2); st.rerun()
         db_session.close()
 
-# --- Main Application Dashboard ---
 def main_dashboard():
     st.set_page_config(layout="wide", initial_sidebar_state="expanded", page_icon="👥", page_title="Dashboard")
     if 'chart_data' not in st.session_state: st.session_state.chart_data = pd.DataFrame(columns=['Time', 'Count'])
     if 'alert_history' not in st.session_state: st.session_state.alert_history = []
     if 'last_alert_time' not in st.session_state: st.session_state.last_alert_time = 0
     
-    MODELS_DIR = "models"
-    os.makedirs(MODELS_DIR, exist_ok=True)
+    MODELS_DIR = "models"; os.makedirs(MODELS_DIR, exist_ok=True)
     MODEL_URL_A = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_a.pth"
     MODEL_URL_B = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_b.pth"
     MODEL_PATH_A = os.path.join(MODELS_DIR, "csrnet_best_part_a.pth")
@@ -227,7 +228,8 @@ def main_dashboard():
 
 # --- Main App Router ---
 if __name__ == '__main__':
-    if 'logged_in' not in st.session_state: st.session_state.logged_in = False
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
     
     if st.session_state.logged_in:
         main_dashboard()
