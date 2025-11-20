@@ -81,7 +81,7 @@ def load_improved_csrnet_model(path):
     model = ImprovedCSRNet().to(device)
     import torch.serialization
     torch.serialization.add_safe_globals([np.core.multiarray.scalar])
-    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
     state_dict = checkpoint.get('model_state_dict', checkpoint)
     model.load_state_dict(state_dict); model.eval()
     return model
