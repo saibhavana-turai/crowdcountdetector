@@ -28,7 +28,7 @@ CSRNET_A_PATH = os.path.join(MODEL_DIR, "csrnet_best_part_a.pth")
 CSRNET_B_PATH = os.path.join(MODEL_DIR, "csrnet_best_part_b.pth")
 
 CSRNET_A_URL = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_a.pth"
-CSRNET_B_URL = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/main/csrnet_best_part_b.pth"
+CSRNET_B_URL = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_b.pth"
 
 # ================= DATABASE =================
 
