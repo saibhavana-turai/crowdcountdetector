@@ -111,15 +111,22 @@ def load_improved_csrnet_model(path):
             x = self.frontend(x)
             x = self.backend(x)
             x = self.output_layer(x)
-            return torch.nn.functional.interpolate(x, size=(512, 512), mode="bilinear", align_corners=False)
+            return torch.nn.functional.interpolate(
+                x, size=(512, 512), mode="bilinear", align_corners=False
+            )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ImprovedCSRNet().to(device)
 
-    checkpoint = torch.load(path, map_location=device)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    model.load_state_dict(state_dict)
+    # 🔧 FIX FOR STREAMLIT CLOUD / PYTHON 3.13
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
 
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        state_dict = checkpoint
+
+    model.load_state_dict(state_dict)
     model.eval()
     return model
 
@@ -157,11 +164,15 @@ def get_count_and_overlay(frame, model, yolo_model, user, threshold):
             st.session_state.alert_history.insert(0, f"ALERT: {count} people detected")
 
     heat = cv2.normalize(density, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    heat = cv2.applyColorMap(cv2.resize(heat, (frame.shape[1], frame.shape[0])), cv2.COLORMAP_JET)
+    heat = cv2.applyColorMap(
+        cv2.resize(heat, (frame.shape[1], frame.shape[0])), cv2.COLORMAP_JET
+    )
     overlay = cv2.addWeighted(frame, 0.6, heat, 0.4, 0)
 
-    cv2.putText(overlay, f"Count: {count}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(
+        overlay, f"Count: {count}", (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2
+    )
 
     return overlay, count
 
@@ -245,7 +256,9 @@ def main_dashboard():
             continue
 
         raw.image(frame, channels="BGR")
-        overlay, _ = get_count_and_overlay(frame, model, yolo_model, st.session_state.user, threshold)
+        overlay, _ = get_count_and_overlay(
+            frame, model, yolo_model, st.session_state.user, threshold
+        )
         processed.image(overlay, channels="BGR")
 
 # ================= ENTRY =================
