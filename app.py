@@ -53,26 +53,35 @@ from alert_system import send_alert
 
 # ================= DOWNLOAD =================
 
+
+                
 def download_model(url, path):
-    # Delete invalid or tiny files
+    # Delete corrupted / HTML files
     if os.path.exists(path):
-        if os.path.getsize(path) < 5_000_000:  # < 5MB = corrupted
+        if os.path.getsize(path) < 10_000_000:  # CSRNet is ~150MB
             os.remove(path)
 
     if not os.path.exists(path):
-        r = requests.get(url, stream=True, timeout=60)
+        st.info(f"Downloading {os.path.basename(path)}")
+
+        r = requests.get(
+            url + "?download=true",
+            stream=True,
+            timeout=120,
+            allow_redirects=True
+        )
         r.raise_for_status()
+
         with open(path, "wb") as f:
-            for chunk in r.iter_content(8192):
-                f.write(chunk)
-                
-def download_model(url, path):
-    if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
-        return
-    r = requests.get(url, stream=True, timeout=60)
-    with open(path, "wb") as f:
-        for chunk in r.iter_content(8192):
-            f.write(chunk)
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+
+    # FINAL SAFETY CHECK
+    if os.path.getsize(path) < 10_000_000:
+        st.error("Model download failed (invalid file)")
+        st.stop()
+
 
 def ensure_models():
     download_model(CSR_A_URL, CSR_A)
