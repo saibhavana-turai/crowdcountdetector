@@ -51,40 +51,42 @@ Base.metadata.create_all(bind=engine)
 
 from alert_system import send_alert
 
-# ================= MODEL DOWNLOAD (SAFE) =================
+# ================= MODEL DOWNLOAD =================
+
+def is_valid_pytorch_file(path):
+    """Check PyTorch binary magic header"""
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"\x80\x04"  # pickle header
+    except:
+        return False
 
 def download_model(url, path):
-    # Remove corrupted / HTML files
-    if os.path.exists(path) and os.path.getsize(path) < 10_000_000:
+    if os.path.exists(path) and is_valid_pytorch_file(path):
+        return
+
+    if os.path.exists(path):
         os.remove(path)
 
-    if not os.path.exists(path):
-        st.info(f"Downloading {os.path.basename(path)}")
-        r = requests.get(
-            url,
-            stream=True,
-            timeout=120,
-            allow_redirects=True
-        )
-        r.raise_for_status()
+    st.info(f"Downloading {os.path.basename(path)}")
+    r = requests.get(url, stream=True, timeout=120, allow_redirects=True)
+    r.raise_for_status()
 
-        with open(path, "wb") as f:
-            for chunk in r.iter_content(8192):
-                if chunk:
-                    f.write(chunk)
+    with open(path, "wb") as f:
+        for chunk in r.iter_content(8192):
+            if chunk:
+                f.write(chunk)
 
-    # Final safety check
-    if os.path.getsize(path) < 10_000_000:
-        st.error("Model download failed or corrupted")
+    if not is_valid_pytorch_file(path):
+        st.error("Downloaded file is NOT a valid PyTorch model")
         st.stop()
 
 def ensure_models():
     download_model(CSR_A_URL, CSR_A)
     download_model(CSR_B_URL, CSR_B)
 
-# ================= CSRNET SAFE LOADER =================
+# ================= CSRNET LOADER (NO CACHE) =================
 
-@st.cache_resource
 def load_csrnet_safe(path):
     import torch
     from torchvision import models
@@ -107,20 +109,16 @@ def load_csrnet_safe(path):
             self.output = torch.nn.Conv2d(64, 1, 1)
 
         def forward(self, x):
-            x = self.frontend(x)
-            x = self.backend(x)
-            return self.output(x)
+            return self.output(self.backend(self.frontend(x)))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CSRNet().to(device)
 
-    checkpoint = torch.load(path, map_location=device)
-
-    if isinstance(checkpoint, dict):
-        if "state_dict" in checkpoint:
-            checkpoint = checkpoint["state_dict"]
-        elif "model_state_dict" in checkpoint:
-            checkpoint = checkpoint["model_state_dict"]
+    checkpoint = torch.load(
+        path,
+        map_location=device,
+        weights_only=True
+    )
 
     model_dict = model.state_dict()
     filtered = {
@@ -135,7 +133,7 @@ def load_csrnet_safe(path):
     model.eval()
     return model
 
-# ================= PROCESSING =================
+# ================= PROCESS =================
 
 def preprocess(frame):
     import torch
@@ -162,7 +160,6 @@ def count_people(frame, model, user, threshold):
     )
     heat = cv2.resize(heat, (frame.shape[1], frame.shape[0]))
     out = cv2.addWeighted(frame, 0.6, heat, 0.4, 0)
-
     cv2.putText(out, f"Count: {count}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
     return out
@@ -173,9 +170,7 @@ def dashboard():
     st.set_page_config(layout="wide", page_title="CrowdSense")
 
     ensure_models()
-    model_a = load_csrnet_safe(CSR_A)
-    model_b = load_csrnet_safe(CSR_B)
-    model = model_a
+    model = load_csrnet_safe(CSR_A)
 
     if "last_alert" not in st.session_state:
         st.session_state.last_alert = 0
@@ -204,8 +199,8 @@ def dashboard():
         except queue.Empty:
             continue
 
-        result = count_people(frame, model, st.session_state.user, threshold)
-        view.image(result, channels="BGR")
+        view.image(count_people(frame, model, st.session_state.user, threshold),
+                   channels="BGR")
 
 # ================= AUTH =================
 
