@@ -35,7 +35,7 @@ CSRNET_B_URL = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/re
 Base = declarative_base()
 
 class User(Base):
-    __tablename__ = 'user'
+    __tablename__ = "user"
     id = Column(Integer, primary_key=True)
     email = Column(String(100), unique=True, nullable=False)
     password = Column(String(200), nullable=False)
@@ -61,8 +61,8 @@ def download_file(url, destination):
         r.raise_for_status()
         total = int(r.headers.get("content-length", 0))
         progress = st.progress(0)
-
         downloaded = 0
+
         with open(destination, "wb") as f:
             for chunk in r.iter_content(8192):
                 f.write(chunk)
@@ -118,15 +118,12 @@ def load_improved_csrnet_model(path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ImprovedCSRNet().to(device)
 
-    # 🔧 FIX FOR STREAMLIT CLOUD / PYTHON 3.13
     checkpoint = torch.load(path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
 
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        state_dict = checkpoint["model_state_dict"]
-    else:
-        state_dict = checkpoint
+    # 🔧 FIX: prevents RuntimeError
+    model.load_state_dict(state_dict, strict=False)
 
-    model.load_state_dict(state_dict)
     model.eval()
     return model
 
@@ -150,30 +147,36 @@ def preprocess_frame(frame):
 
 def get_count_and_overlay(frame, model, yolo_model, user, threshold):
     import torch
-    inp = preprocess_frame(frame)
 
+    inp = preprocess_frame(frame)
     with torch.no_grad():
         density = model(inp)[0, 0].cpu().numpy()
 
     count = int(round(max(density.sum(), 0)))
 
-    if count >= threshold and user:
+    if user and count >= threshold:
         if time.time() - st.session_state.last_alert_time > 15:
             send_alert(count, user["email"])
             st.session_state.last_alert_time = time.time()
-            st.session_state.alert_history.insert(0, f"ALERT: {count} people detected")
+            st.session_state.alert_history.insert(
+                0, f"ALERT: {count} people detected"
+            )
 
     heat = cv2.normalize(density, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     heat = cv2.applyColorMap(
         cv2.resize(heat, (frame.shape[1], frame.shape[0])), cv2.COLORMAP_JET
     )
+
     overlay = cv2.addWeighted(frame, 0.6, heat, 0.4, 0)
-
     cv2.putText(
-        overlay, f"Count: {count}", (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2
+        overlay,
+        f"Count: {count}",
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (255, 255, 255),
+        2,
     )
-
     return overlay, count
 
 # ================= AUTH =================
