@@ -29,6 +29,7 @@ Base.metadata.create_all(bind=engine)
 
 # --- Project Imports ---
 from alert_system import send_alert
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
 
 # --- Helper function to download files (with one-time message) ---
 def download_file(url, destination):
@@ -45,11 +46,13 @@ def download_file(url, destination):
                 with open(destination, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk); bytes_downloaded += len(chunk)
-                        if total_size > 0: progress_bar.progress(min(1.0, bytes_downloaded / total_size))
+                        if total_size > 0:
+                            progress_bar.progress(min(1.0, bytes_downloaded / total_size))
             progress_bar.empty()
             st.session_state[message_key] = True
         except requests.exceptions.RequestException as e:
-            st.error(f"Error downloading model: {e}"); return False
+            st.error(f"Error downloading model: {e}")
+            return False
     if os.path.getsize(destination) < 1_000_000:
         st.error(f"Downloaded model is too small. Please verify the download link.")
         return False
@@ -61,25 +64,35 @@ def download_file(url, destination):
 # --- Model Loading (with Caching) ---
 @st.cache_resource
 def load_improved_csrnet_model(path):
-    import torch; from torchvision import models
+    import torch
+    from torchvision import models
     class ImprovedCSRNet(torch.nn.Module):
         def __init__(self):
-            super().__init__(); vgg16 = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+            super().__init__()
+            vgg16 = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
             self.frontend = torch.nn.Sequential(*list(vgg16.features.children())[:23])
             self.backend = torch.nn.Sequential(
-                torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True), torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
-                torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True), torch.nn.Conv2d(512, 256, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
-                torch.nn.Conv2d(256, 128, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True), torch.nn.Conv2d(128, 64, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
+                torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
+                torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
+                torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
+                torch.nn.Conv2d(512, 256, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
+                torch.nn.Conv2d(256, 128, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
+                torch.nn.Conv2d(128, 64, 3, padding=2, dilation=2), torch.nn.ReLU(inplace=True),
             )
             self.output_layer = torch.nn.Conv2d(64, 1, 1)
         def forward(self, x):
-            x = self.frontend(x); x = self.backend(x); x = self.output_layer(x)
+            x = self.frontend(x)
+            x = self.backend(x)
+            x = self.output_layer(x)
             return torch.nn.functional.interpolate(x, size=(512, 512), mode='bilinear', align_corners=False)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'); model = ImprovedCSRNet().to(device)
-    import torch.serialization; torch.serialization.add_safe_globals([np.core.multiarray.scalar])
+    import torch.serialization, torch
+    torch.serialization.add_safe_globals([np.core.multiarray.scalar])
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = ImprovedCSRNet().to(device)
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     state_dict = checkpoint.get('model_state_dict', checkpoint)
-    model.load_state_dict(state_dict); model.eval()
+    model.load_state_dict(state_dict)
+    model.eval()
     return model
 
 @st.cache_resource
@@ -92,164 +105,233 @@ def load_yolo_model():
 
 # --- Core Processing Logic ---
 def preprocess_frame(frame):
-    import torch; device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    IMG_SIZE=(512, 512); IMAGENET_MEAN=np.array([0.485, 0.456, 0.406]); IMAGENET_STD=np.array([0.229, 0.224, 0.225])
-    frame_resized = cv2.resize(frame, (IMG_SIZE[1], IMG_SIZE[0])); img_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+    import torch
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    IMG_SIZE=(512, 512)
+    IMAGENET_MEAN=np.array([0.485, 0.456, 0.406])
+    IMAGENET_STD=np.array([0.229, 0.224, 0.225])
+    frame_resized = cv2.resize(frame, (IMG_SIZE[1], IMG_SIZE[0]))
+    img_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
     img = (img_rgb.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
     return torch.from_numpy(img.transpose(2, 0, 1)).unsqueeze(0).float().to(device)
 
 def get_count_and_overlay(frame, model, yolo_model, user, threshold):
     import torch
     input_tensor = preprocess_frame(frame)
-    with torch.no_grad(): density_np = model(input_tensor)[0, 0].cpu().numpy()
+    with torch.no_grad():
+        density_np = model(input_tensor)[0, 0].cpu().numpy()
     count = max(density_np.sum(), 0)
     if count < 1.7:
         def yolo_person_count(frame_for_yolo, yolo):
-            results = yolo(frame_for_yolo[..., ::-1]); pred = results.pred[0]
+            results = yolo(frame_for_yolo[..., ::-1])
+            pred = results.pred[0]
             return int((pred[:, -1].cpu().numpy() == 0).sum()) if pred is not None and len(pred) > 0 else 0
         yolo_count = yolo_person_count(frame, yolo_model)
-        if yolo_count > count: count = float(yolo_count)
+        if yolo_count > count:
+            count = float(yolo_count)
     final_count = max(0, int(round(count)))
     if final_count >= threshold and user and 'last_alert_time' in st.session_state:
         if (time.time() - st.session_state.last_alert_time) > 15.0:
-            send_alert(final_count, user['email']); st.session_state.last_alert_time = time.time()
+            send_alert(final_count, user['email'])
+            st.session_state.last_alert_time = time.time()
             st.session_state.alert_history.insert(0, f"ALERT: Count of {final_count} detected at {time.strftime('%H:%M:%S')}")
-    dmap_resized = cv2.resize(density_np, (frame.shape[1], frame.shape[0])); dmap_normalized = (dmap_resized / (dmap_resized.max() + 1e-8) * 255).astype(np.uint8)
-    density_color = cv2.applyColorMap(dmap_normalized, cv2.COLORMAP_JET); overlay = cv2.addWeighted(frame, 0.6, density_color, 0.4, 0)
-    cv2.putText(overlay, f'Predicted Count: {final_count}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    dmap_resized = cv2.resize(density_np, (frame.shape[1], frame.shape[0]))
+    dmap_normalized = (dmap_resized / (dmap_resized.max() + 1e-8) * 255).astype(np.uint8)
+    density_color = cv2.applyColorMap(dmap_normalized, cv2.COLORMAP_JET)
+    overlay = cv2.addWeighted(frame, 0.6, density_color, 0.4, 0)
+    cv2.putText(overlay, f'Predicted Count: {final_count}', (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
     return overlay, final_count
 
 # --- Authentication and Main Dashboard UI ---
 def authentication_page():
     st.set_page_config(layout="centered", page_icon="👥", page_title="Welcome")
-    if 'auth_view' not in st.session_state: st.session_state.auth_view = "Login"
+    if 'auth_view' not in st.session_state:
+        st.session_state.auth_view = "Login"
     _, col2, _ = st.columns([1, 2, 1])
     with col2:
-        st.title("Welcome to CrowdSense"); choice = st.radio("Action", ["Login", "Register"], horizontal=True, label_visibility="collapsed")
-        st.session_state.auth_view = choice; db_session = SessionLocal()
+        st.title("Welcome to CrowdSense")
+        choice = st.radio("Action", ["Login", "Register"], horizontal=True, label_visibility="collapsed")
+        st.session_state.auth_view = choice
+        db_session = SessionLocal()
         if st.session_state.auth_view == "Login":
             st.subheader("Login to your account")
             with st.form("login_form"):
-                email = st.text_input("Email"); password = st.text_input("Password", type="password")
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
                 if st.form_submit_button("Login"):
                     user = db_session.query(User).filter_by(email=email).first()
                     if user and check_password_hash(user.password, password):
-                        st.session_state.logged_in = True; st.session_state.user = {'email': user.email, 'id': user.id}; st.rerun()
-                    else: st.error("Invalid email or password")
+                        st.session_state.logged_in = True
+                        st.session_state.user = {'email': user.email, 'id': user.id}
+                        st.rerun()
+                    else:
+                        st.error("Invalid email or password")
         else:
             st.subheader("Create a new account")
             with st.form("register_form"):
-                email = st.text_input("Email"); password = st.text_input("Password", type="password")
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
                 if st.form_submit_button("Register"):
-                    if db_session.query(User).filter_by(email=email).first(): st.error("Email already exists.")
+                    if db_session.query(User).filter_by(email=email).first():
+                        st.error("Email already exists.")
                     else:
                         new_user = User(email=email, password=generate_password_hash(password, method='pbkdf2:sha256'))
-                        db_session.add(new_user); db_session.commit(); st.success("Registration successful! Please login."); st.balloons()
-                        st.session_state.auth_view = "Login"; time.sleep(2); st.rerun()
+                        db_session.add(new_user)
+                        db_session.commit()
+                        st.success("Registration successful! Please login.")
+                        st.balloons()
+                        st.session_state.auth_view = "Login"
+                        time.sleep(2)
+                        st.rerun()
         db_session.close()
 
+# --- WebRTC Video Processor (browser camera) ---
+class CrowdVideoProcessor(VideoProcessorBase):
+    def __init__(self, model, yolo_model, user, threshold):
+        self.model = model
+        self.yolo_model = yolo_model
+        self.user = user
+        self.threshold = threshold
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        overlay, count = get_count_and_overlay(img, self.model, self.yolo_model, self.user, self.threshold)
+
+        # Update chart data and alerts
+        new_data = pd.DataFrame({'Time': [time.strftime('%H:%M:%S')], 'Count': [count]})
+        st.session_state.chart_data = pd.concat([st.session_state.chart_data, new_data]).tail(30)
+        return av.VideoFrame.from_ndarray(overlay, format="bgr24")
+
 def main_dashboard():
-    st.set_page_config(layout="wide", initial_sidebar_state="expanded", page_icon="👥", page_title="Dashboard")
-    # ... (session state initialization is unchanged) ...
-    if 'chart_data' not in st.session_state: st.session_state.chart_data = pd.DataFrame(columns=['Time', 'Count'])
-    if 'alert_history' not in st.session_state: st.session_state.alert_history = []
-    if 'last_alert_time' not in st.session_state: st.session_state.last_alert_time = 0
-    
-    # ... (model downloading and loading is unchanged) ...
-    MODELS_DIR = "models"; os.makedirs(MODELS_DIR, exist_ok=True)
+    st.set_page_config(layout="wide", initial_sidebar_state="expanded",
+                       page_icon="👥", page_title="Dashboard")
+
+    if 'chart_data' not in st.session_state:
+        st.session_state.chart_data = pd.DataFrame(columns=['Time', 'Count'])
+    if 'alert_history' not in st.session_state:
+        st.session_state.alert_history = []
+    if 'last_alert_time' not in st.session_state:
+        st.session_state.last_alert_time = 0
+
+    MODELS_DIR = "models"
+    os.makedirs(MODELS_DIR, exist_ok=True)
     MODEL_URL_A = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_a.pth"
     MODEL_URL_B = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_b.pth"
     MODEL_PATH_A = os.path.join(MODELS_DIR, "csrnet_best_part_a.pth")
     MODEL_PATH_B = os.path.join(MODELS_DIR, "csrnet_best_part_b.pth")
     if not (download_file(MODEL_URL_A, MODEL_PATH_A) and download_file(MODEL_URL_B, MODEL_PATH_B)):
-        st.error("Model download failed. App cannot continue."); return
+        st.error("Model download failed. App cannot continue.")
+        return
     model_dense = load_improved_csrnet_model(MODEL_PATH_A)
     model_sparse = load_improved_csrnet_model(MODEL_PATH_B)
     yolo_model = load_yolo_model()
-    
-    # ... (sidebar UI is unchanged) ...
+
     with st.sidebar:
-        st.title("CrowdSense"); st.markdown("---")
-        user_info = st.session_state.get('user', {}); st.write(f"Logged in as: **{user_info.get('email', 'N/A')}**")
+        st.title("CrowdSense")
+        st.markdown("---")
+        user_info = st.session_state.get('user', {})
+        st.write(f"Logged in as: **{user_info.get('email', 'N/A')}**")
         if st.button("Logout"):
-            for key in st.session_state.keys(): del st.session_state[key]
+            keys = list(st.session_state.keys())
+            for key in keys:
+                del st.session_state[key]
             st.rerun()
-        st.markdown("---"); st.header("Controls")
+        st.markdown("---")
+        st.header("Controls")
         model_choice = st.selectbox("Analysis Model", ["Dense Crowd Model", "Sparse Crowd Model"])
         current_model = model_dense if "Dense" in model_choice else model_sparse
         threshold = st.slider("Alert Threshold", 0, 200, 50)
+
         st.header("Input Source")
-        use_webcam = st.button("Use Webcam")
-        video_file = st.file_uploader("Upload Video", type=['mp4', 'mov', 'avi'])
-        image_file = st.file_uploader("Upload Image", type=['png', 'jpg', 'jpeg'])
-    
-    # ... (main content UI is unchanged) ...
-    st.title("Live Analysis Dashboard"); status_placeholder = st.empty()
-    col1, col2 = st.columns(2);
-    with col1: st.header("Processed Feed / Heatmap"); processed_feed = st.empty()
-    with col2: st.header("Raw Input Feed"); raw_feed = st.empty()
-    st.markdown("---"); col3, col4 = st.columns([2, 1])
-    with col3: st.header("Live Crowd Count Trend"); chart_placeholder = st.empty()
-    with col4: st.header("Alert History"); alert_placeholder = st.expander("Show/Hide Alerts", expanded=True)
-    
-    cap = None;
-    # --- THIS IS THE FINAL, MOST ROBUST WEBCAM FIX ---
-    if use_webcam:
-        status_placeholder.info("⏳ Initializing webcam, please wait...")
-        
-        # We will try to open the camera a few times before giving up.
-        cap = None
-        attempts = 0
-        while attempts < 3:
-            # Try with DSHOW first, as it's often faster on Windows
-            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-            if cap.isOpened():
-                break
-            # If DSHOW fails, try the default backend
-            cap = cv2.VideoCapture(0)
-            if cap.isOpened():
-                break
-            attempts += 1
-            time.sleep(0.5) # Wait half a second between attempts
+        source = st.radio(
+            "Select source",
+            ["Browser camera (WebRTC)", "Upload Video", "Upload Image"],
+            index=0
+        )
+        video_file = None
+        image_file = None
+        if source == "Upload Video":
+            video_file = st.file_uploader("Upload Video", type=['mp4', 'mov', 'avi'])
+        elif source == "Upload Image":
+            image_file = st.file_uploader("Upload Image", type=['png', 'jpg', 'jpeg'])
 
-        if not cap or not cap.isOpened():
-            status_placeholder.error("❌ Error: Could not open webcam after multiple attempts. Please check system permissions and ensure no other app is using the camera.")
-            cap = None
-        else:
-            status_placeholder.info("✅ Webcam active. Processing feed...")
-    # --------------------------------------------------
+    st.title("Live Analysis Dashboard")
+    status_placeholder = st.empty()
+    col1, col2 = st.columns(2)
+    with col1:
+        st.header("Processed Feed / Heatmap")
+        processed_feed = st.empty()
+    with col2:
+        st.header("Raw Input Feed")
+        raw_feed = st.empty()
 
-    # ... (rest of the file is unchanged) ...
-    elif video_file:
-        with open("temp_video.mp4", "wb") as f: f.write(video_file.getbuffer())
-        cap = cv2.VideoCapture("temp_video.mp4"); status_placeholder.info(f"Processing uploaded video: {video_file.name}")
-    elif image_file:
-        bytes_data = image_file.getvalue(); cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+    st.markdown("---")
+    col3, col4 = st.columns([2, 1])
+    with col3:
+        st.header("Live Crowd Count Trend")
+        chart_placeholder = st.empty()
+    with col4:
+        st.header("Alert History")
+        alert_placeholder = st.expander("Show/Hide Alerts", expanded=True)
+
+    user_info = st.session_state.get('user', {})
+
+    # Browser camera via WebRTC (browser will show permission prompt)
+    if source == "Browser camera (WebRTC)":
+        status_placeholder.info("Allow camera access when your browser prompts you.")
+        webrtc_streamer(
+            key="crowd-camera",
+            mode=WebRtcMode.SENDRECV,
+            video_processor_factory=lambda: CrowdVideoProcessor(
+                current_model, yolo_model, user_info, threshold
+            ),
+            media_stream_constraints={"video": True, "audio": False},
+        )
+
+    cap = None
+    if source == "Upload Video" and video_file:
+        with open("temp_video.mp4", "wb") as f:
+            f.write(video_file.getbuffer())
+        cap = cv2.VideoCapture("temp_video.mp4")
+        status_placeholder.info(f"Processing uploaded video: {video_file.name}")
+    elif source == "Upload Image" and image_file:
+        bytes_data = image_file.getvalue()
+        cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
         raw_feed.image(cv2_img, channels="BGR")
         overlay, count = get_count_and_overlay(cv2_img, current_model, yolo_model, user_info, threshold)
-        processed_feed.image(overlay, channels="BGR"); status_placeholder.success(f"Image processed. Predicted Count: {count}")
+        processed_feed.image(overlay, channels="BGR")
+        status_placeholder.success(f"Image processed. Predicted Count: {count}")
         new_data = pd.DataFrame({'Time': [time.strftime('%H:%M:%S')], 'Count': [count]})
         st.session_state.chart_data = pd.concat([st.session_state.chart_data, new_data]).tail(30)
-    else: status_placeholder.info("Select an input source from the sidebar to begin.")
-    
-    with chart_placeholder: st.line_chart(st.session_state.chart_data.set_index('Time'))
+
+    with chart_placeholder:
+        if not st.session_state.chart_data.empty:
+            st.line_chart(st.session_state.chart_data.set_index('Time'))
+
     with alert_placeholder:
-        for alert in st.session_state.alert_history: st.warning(alert)
+        for alert in st.session_state.alert_history:
+            st.warning(alert)
 
     if cap:
-        FRAME_SKIP = 4; frame_count = 0
+        FRAME_SKIP = 4
+        frame_count = 0
         while cap.isOpened():
             ret, frame = cap.read()
-            if not ret: status_placeholder.warning("Video ended or webcam disconnected."); break
+            if not ret:
+                status_placeholder.warning("Video ended.")
+                break
             raw_feed.image(frame, channels="BGR")
             if frame_count % (FRAME_SKIP + 1) == 0:
                 overlay, count = get_count_and_overlay(frame, current_model, yolo_model, user_info, threshold)
                 processed_feed.image(overlay, channels="BGR")
                 new_data = pd.DataFrame({'Time': [time.strftime('%H:%M:%S')], 'Count': [count]})
                 st.session_state.chart_data = pd.concat([st.session_state.chart_data, new_data]).tail(30)
-                with chart_placeholder: st.line_chart(st.session_state.chart_data.set_index('Time'))
+                with chart_placeholder:
+                    st.line_chart(st.session_state.chart_data.set_index('Time'))
                 with alert_placeholder:
-                    for alert in st.session_state.alert_history: st.warning(alert)
+                    for alert in st.session_state.alert_history:
+                        st.warning(alert)
                 st.session_state.last_overlay = overlay
             else:
                 if 'last_overlay' in st.session_state:
@@ -262,7 +344,7 @@ def main_dashboard():
 if __name__ == '__main__':
     if 'logged_in' not in st.session_state:
         st.session_state.logged_in = False
-    
+
     if st.session_state.logged_in:
         main_dashboard()
     else:
