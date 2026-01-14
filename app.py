@@ -27,8 +27,8 @@ os.makedirs(INSTANCE_DIR, exist_ok=True)
 CSR_A = os.path.join(MODEL_DIR, "csrnet_a.pth")
 CSR_B = os.path.join(MODEL_DIR, "csrnet_b.pth")
 
-CSR_A_URL = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_a.pth"
-CSR_B_URL = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_b.pth"
+CSR_A_URL = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_a.pth?download=true"
+CSR_B_URL = "https://huggingface.co/saibhavana-turai/crowd-counting-csrnet/resolve/main/csrnet_best_part_b.pth?download=true"
 
 # ================= DATABASE =================
 
@@ -51,21 +51,17 @@ Base.metadata.create_all(bind=engine)
 
 from alert_system import send_alert
 
-# ================= DOWNLOAD =================
+# ================= MODEL DOWNLOAD (SAFE) =================
 
-
-                
 def download_model(url, path):
-    # Delete corrupted / HTML files
-    if os.path.exists(path):
-        if os.path.getsize(path) < 10_000_000:  # CSRNet is ~150MB
-            os.remove(path)
+    # Remove corrupted / HTML files
+    if os.path.exists(path) and os.path.getsize(path) < 10_000_000:
+        os.remove(path)
 
     if not os.path.exists(path):
         st.info(f"Downloading {os.path.basename(path)}")
-
         r = requests.get(
-            url + "?download=true",
+            url,
             stream=True,
             timeout=120,
             allow_redirects=True
@@ -73,21 +69,20 @@ def download_model(url, path):
         r.raise_for_status()
 
         with open(path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
+            for chunk in r.iter_content(8192):
                 if chunk:
                     f.write(chunk)
 
-    # FINAL SAFETY CHECK
+    # Final safety check
     if os.path.getsize(path) < 10_000_000:
-        st.error("Model download failed (invalid file)")
+        st.error("Model download failed or corrupted")
         st.stop()
-
 
 def ensure_models():
     download_model(CSR_A_URL, CSR_A)
     download_model(CSR_B_URL, CSR_B)
 
-# ================= SAFE MODEL LOADER =================
+# ================= CSRNET SAFE LOADER =================
 
 @st.cache_resource
 def load_csrnet_safe(path):
@@ -101,13 +96,13 @@ def load_csrnet_safe(path):
             self.frontend = torch.nn.Sequential(*list(vgg.features.children())[:23])
             self.backend = torch.nn.Sequential(
                 torch.nn.Conv2d(512, 512, 3, padding=2, dilation=2),
-                torch.nn.ReLU(),
+                torch.nn.ReLU(True),
                 torch.nn.Conv2d(512, 256, 3, padding=2, dilation=2),
-                torch.nn.ReLU(),
+                torch.nn.ReLU(True),
                 torch.nn.Conv2d(256, 128, 3, padding=2, dilation=2),
-                torch.nn.ReLU(),
+                torch.nn.ReLU(True),
                 torch.nn.Conv2d(128, 64, 3, padding=2, dilation=2),
-                torch.nn.ReLU(),
+                torch.nn.ReLU(True),
             )
             self.output = torch.nn.Conv2d(64, 1, 1)
 
@@ -119,12 +114,7 @@ def load_csrnet_safe(path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CSRNet().to(device)
 
-    checkpoint = torch.load(
-    path,
-    map_location=device,
-    weights_only=True
-)
-
+    checkpoint = torch.load(path, map_location=device)
 
     if isinstance(checkpoint, dict):
         if "state_dict" in checkpoint:
@@ -132,7 +122,6 @@ def load_csrnet_safe(path):
         elif "model_state_dict" in checkpoint:
             checkpoint = checkpoint["model_state_dict"]
 
-    # 🔥 CRITICAL FIX
     model_dict = model.state_dict()
     filtered = {
         k.replace("module.", ""): v
@@ -146,7 +135,7 @@ def load_csrnet_safe(path):
     model.eval()
     return model
 
-# ================= PROCESS =================
+# ================= PROCESSING =================
 
 def preprocess(frame):
     import torch
@@ -158,7 +147,8 @@ def preprocess(frame):
 def count_people(frame, model, user, threshold):
     import torch
     with torch.no_grad():
-        density = model(preprocess(frame))[0, 0].numpy()
+        density = model(preprocess(frame))[0, 0].cpu().numpy()
+
     count = int(max(density.sum(), 0))
 
     if user and count >= threshold:
@@ -172,23 +162,25 @@ def count_people(frame, model, user, threshold):
     )
     heat = cv2.resize(heat, (frame.shape[1], frame.shape[0]))
     out = cv2.addWeighted(frame, 0.6, heat, 0.4, 0)
+
     cv2.putText(out, f"Count: {count}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
     return out
 
-# ================= UI =================
+# ================= DASHBOARD =================
 
 def dashboard():
+    st.set_page_config(layout="wide", page_title="CrowdSense")
+
     ensure_models()
     model_a = load_csrnet_safe(CSR_A)
     model_b = load_csrnet_safe(CSR_B)
-
     model = model_a
 
     if "last_alert" not in st.session_state:
         st.session_state.last_alert = 0
 
-    threshold = st.sidebar.slider("Alert threshold", 10, 200, 50)
+    threshold = st.sidebar.slider("Alert Threshold", 10, 200, 50)
 
     q = queue.Queue()
 
@@ -204,15 +196,16 @@ def dashboard():
         media_stream_constraints={"video": True, "audio": False},
     )
 
-    placeholder = st.empty()
+    view = st.empty()
 
     while ctx.state.playing:
         try:
             frame = q.get(timeout=1)
         except queue.Empty:
             continue
+
         result = count_people(frame, model, st.session_state.user, threshold)
-        placeholder.image(result, channels="BGR")
+        view.image(result, channels="BGR")
 
 # ================= AUTH =================
 
@@ -221,7 +214,6 @@ def auth():
     st.title("CrowdSense")
 
     mode = st.radio("Action", ["Login", "Register"])
-
     email = st.text_input("Email")
     pwd = st.text_input("Password", type="password")
 
@@ -244,7 +236,7 @@ def auth():
                 st.error("Email already exists")
     db.close()
 
-# ================= MAIN =================
+# ================= ENTRY =================
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
