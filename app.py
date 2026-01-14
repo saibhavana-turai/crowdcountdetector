@@ -54,6 +54,19 @@ from alert_system import send_alert
 # ================= DOWNLOAD =================
 
 def download_model(url, path):
+    # Delete invalid or tiny files
+    if os.path.exists(path):
+        if os.path.getsize(path) < 5_000_000:  # < 5MB = corrupted
+            os.remove(path)
+
+    if not os.path.exists(path):
+        r = requests.get(url, stream=True, timeout=60)
+        r.raise_for_status()
+        with open(path, "wb") as f:
+            for chunk in r.iter_content(8192):
+                f.write(chunk)
+                
+def download_model(url, path):
     if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
         return
     r = requests.get(url, stream=True, timeout=60)
@@ -97,7 +110,12 @@ def load_csrnet_safe(path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CSRNet().to(device)
 
-    checkpoint = torch.load(path, map_location=device)
+    checkpoint = torch.load(
+    path,
+    map_location=device,
+    weights_only=True
+)
+
 
     if isinstance(checkpoint, dict):
         if "state_dict" in checkpoint:
